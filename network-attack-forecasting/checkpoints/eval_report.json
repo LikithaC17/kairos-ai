@@ -1,0 +1,14 @@
+{
+  "current_state": {
+    "accuracy": 0.8058,
+    "f1_macro": 0.4462,
+    "f1_weighted": 0.7191,
+    "auroc_macro": null
+  },
+  "next_state": {
+    "accuracy": 0.9137,
+    "f1_macro": 0.4774,
+    "f1_weighted": 0.8725,
+    "auroc_macro": null
+  }
+}

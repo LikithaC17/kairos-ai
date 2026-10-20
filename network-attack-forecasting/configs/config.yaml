@@ -1,0 +1,30 @@
+# NetForecast AI — Central Configuration File
+project:
+  name: "NetForecast AI"
+  version: "1.0.0"
+  random_seed: 42
+
+paths:
+  checkpoints_dir: "checkpoints"
+  data_dir: "data"
+  simulated_dir: "data/simulated"
+
+pipeline:
+  sequence_length: 20
+  forecast_horizon: 3
+  core_feature_count: 7
+  alert_threshold: 35
+
+model:
+  name: "NetworkStateGRU"
+  hidden_dim: 128
+  num_layers: 2
+  classes:
+    - "NORMAL"
+    - "ELEVATED"
+    - "SUSPICIOUS"
+    - "ATTACK"
+
+server:
+  host: "0.0.0.0"
+  port: 8000

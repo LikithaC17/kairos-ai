@@ -1,0 +1,36 @@
+# Git
+.git
+.github
+
+# Python bytecode & cache
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache
+
+# Virtual environments
+env/
+venv/
+.venv/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE & Editor artifacts
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Frontend build cache & dependencies (inside backend image context)
+network-attack-forecasting/dashboard/node_modules/
+network-attack-forecasting/dashboard/dist/
+
+# IMPORTANT: Model checkpoints and datasets MUST be preserved
+!network-attack-forecasting/checkpoints/
+!network-attack-forecasting/data/
