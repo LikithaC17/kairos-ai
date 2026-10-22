@@ -1,6 +1,6 @@
-# 🛡️ NETSCOPE AI — Frontend Security Operations Center (SOC)
+# 🛡️ THREATORA AI — Frontend Security Operations Center (SOC)
 
-### AI-Based Network Attack Forecasting — Network Security World Model
+### AI-Powered Network Attack Forecasting — “Predict Tomorrow’s Threats, Today.”
 
 Modern, production-ready Security Operations Center (SOC) dashboard built with **React**, **Vite**, **TypeScript**, **Tailwind CSS**, **Recharts**, and **Lucide Icons**.
 

@@ -1,0 +1,36 @@
+{
+  "timestamp": "2026-10-20T16:25:59Z",
+  "seed": 42,
+  "train_samples": 1715,
+  "val_samples": 357,
+  "test_samples": 450,
+  "models_trained": {
+    "gru": {
+      "model_name": "NetworkStateGRU",
+      "model_key": "gru",
+      "parameters": 168712,
+      "training_time_seconds": 18.92,
+      "test_loss": 0.3765,
+      "test_acc_current": 0.9311,
+      "test_acc_next": 0.9444
+    },
+    "lstm": {
+      "model_name": "NetworkStateLSTM",
+      "model_key": "lstm",
+      "parameters": 219272,
+      "training_time_seconds": 12.02,
+      "test_loss": 0.5958,
+      "test_acc_current": 0.9067,
+      "test_acc_next": 0.92
+    },
+    "transformer": {
+      "model_name": "NetworkStateTransformer",
+      "model_key": "transformer",
+      "parameters": 76424,
+      "training_time_seconds": 19.56,
+      "test_loss": 0.4431,
+      "test_acc_current": 0.9156,
+      "test_acc_next": 0.9378
+    }
+  }
+}

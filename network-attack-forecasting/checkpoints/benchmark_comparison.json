@@ -1,0 +1,243 @@
+{
+  "timestamp": "2026-10-20T16:26:54Z",
+  "test_samples": 450,
+  "state_labels": [
+    "NORMAL",
+    "ELEVATED",
+    "SUSPICIOUS",
+    "ATTACK"
+  ],
+  "models": {
+    "gru": {
+      "model_name": "NetworkStateGRU",
+      "model_type": "Recurrent Neural Network (2-Layer GRU Baseline)",
+      "architecture_key": "gru",
+      "parameters": 168712,
+      "checkpoint_size_kb": 665.6,
+      "single_sample_latency_ms": 2.302,
+      "batch_32_latency_ms": 5.981,
+      "current_state": {
+        "accuracy": 0.9311,
+        "f1_macro": 0.9256,
+        "f1_weighted": 0.9295,
+        "precision_macro": 0.9253,
+        "recall_macro": 0.9331,
+        "auroc_macro": 0.9882,
+        "per_class": {
+          "NORMAL": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 95
+          },
+          "ELEVATED": {
+            "precision": 0.8333,
+            "recall": 0.9524,
+            "f1": 0.8889,
+            "support": 42
+          },
+          "SUSPICIOUS": {
+            "precision": 0.9623,
+            "recall": 0.7907,
+            "f1": 0.8681,
+            "support": 129
+          },
+          "ATTACK": {
+            "precision": 0.9055,
+            "recall": 0.9891,
+            "f1": 0.9455,
+            "support": 184
+          }
+        }
+      },
+      "next_state": {
+        "accuracy": 0.9444,
+        "f1_macro": 0.9238,
+        "f1_weighted": 0.9433,
+        "precision_macro": 0.9401,
+        "recall_macro": 0.9106,
+        "auroc_macro": 0.9933,
+        "per_class": {
+          "NORMAL": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 95
+          },
+          "ELEVATED": {
+            "precision": 0.9118,
+            "recall": 0.775,
+            "f1": 0.8378,
+            "support": 40
+          },
+          "SUSPICIOUS": {
+            "precision": 0.9009,
+            "recall": 0.8772,
+            "f1": 0.8889,
+            "support": 114
+          },
+          "ATTACK": {
+            "precision": 0.9476,
+            "recall": 0.99,
+            "f1": 0.9684,
+            "support": 201
+          }
+        }
+      }
+    },
+    "lstm": {
+      "model_name": "NetworkStateLSTM",
+      "model_type": "Recurrent Neural Network (2-Layer LSTM with Cell State)",
+      "architecture_key": "lstm",
+      "parameters": 219272,
+      "checkpoint_size_kb": 863.2,
+      "single_sample_latency_ms": 1.918,
+      "batch_32_latency_ms": 4.324,
+      "current_state": {
+        "accuracy": 0.9067,
+        "f1_macro": 0.8717,
+        "f1_weighted": 0.9027,
+        "precision_macro": 0.9161,
+        "recall_macro": 0.8487,
+        "auroc_macro": 0.9869,
+        "per_class": {
+          "NORMAL": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 95
+          },
+          "ELEVATED": {
+            "precision": 0.9231,
+            "recall": 0.5714,
+            "f1": 0.7059,
+            "support": 42
+          },
+          "SUSPICIOUS": {
+            "precision": 0.8321,
+            "recall": 0.845,
+            "f1": 0.8385,
+            "support": 129
+          },
+          "ATTACK": {
+            "precision": 0.9091,
+            "recall": 0.9783,
+            "f1": 0.9424,
+            "support": 184
+          }
+        }
+      },
+      "next_state": {
+        "accuracy": 0.92,
+        "f1_macro": 0.8631,
+        "f1_weighted": 0.9149,
+        "precision_macro": 0.9265,
+        "recall_macro": 0.8416,
+        "auroc_macro": 0.9927,
+        "per_class": {
+          "NORMAL": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 95
+          },
+          "ELEVATED": {
+            "precision": 0.95,
+            "recall": 0.475,
+            "f1": 0.6333,
+            "support": 40
+          },
+          "SUSPICIOUS": {
+            "precision": 0.7955,
+            "recall": 0.9211,
+            "f1": 0.8537,
+            "support": 114
+          },
+          "ATTACK": {
+            "precision": 0.9606,
+            "recall": 0.9701,
+            "f1": 0.9653,
+            "support": 201
+          }
+        }
+      }
+    },
+    "transformer": {
+      "model_name": "NetworkStateTransformer",
+      "model_type": "Temporal Transformer (Self-Attention & Positional Encoding)",
+      "architecture_key": "transformer",
+      "parameters": 76424,
+      "checkpoint_size_kb": 438.6,
+      "single_sample_latency_ms": 1.009,
+      "batch_32_latency_ms": 3.349,
+      "current_state": {
+        "accuracy": 0.9156,
+        "f1_macro": 0.8988,
+        "f1_weighted": 0.9134,
+        "precision_macro": 0.8996,
+        "recall_macro": 0.9069,
+        "auroc_macro": 0.9849,
+        "per_class": {
+          "NORMAL": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 95
+          },
+          "ELEVATED": {
+            "precision": 0.7551,
+            "recall": 0.881,
+            "f1": 0.8132,
+            "support": 42
+          },
+          "SUSPICIOUS": {
+            "precision": 0.9417,
+            "recall": 0.7519,
+            "f1": 0.8362,
+            "support": 129
+          },
+          "ATTACK": {
+            "precision": 0.9015,
+            "recall": 0.9946,
+            "f1": 0.9457,
+            "support": 184
+          }
+        }
+      },
+      "next_state": {
+        "accuracy": 0.9378,
+        "f1_macro": 0.9127,
+        "f1_weighted": 0.9372,
+        "precision_macro": 0.9116,
+        "recall_macro": 0.9162,
+        "auroc_macro": 0.9925,
+        "per_class": {
+          "NORMAL": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 95
+          },
+          "ELEVATED": {
+            "precision": 0.7727,
+            "recall": 0.85,
+            "f1": 0.8095,
+            "support": 40
+          },
+          "SUSPICIOUS": {
+            "precision": 0.9216,
+            "recall": 0.8246,
+            "f1": 0.8704,
+            "support": 114
+          },
+          "ATTACK": {
+            "precision": 0.9522,
+            "recall": 0.99,
+            "f1": 0.9707,
+            "support": 201
+          }
+        }
+      }
+    }
+  }
+}

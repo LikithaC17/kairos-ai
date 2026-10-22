@@ -4,7 +4,8 @@
 set -e
 
 echo "=================================================="
-echo "  Starting NetForecast AI (Linux / macOS)"
+echo "  Starting Threatora AI (Linux / macOS)"
+echo "  \"Predict Tomorrow's Threats, Today.\""
 echo "=================================================="
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,7 +44,7 @@ npm run dev &
 FRONTEND_PID=$!
 
 echo "=================================================="
-echo "  NetForecast AI is now running!"
+echo "  Threatora AI is now running!"
 echo "  - Dashboard UI: http://localhost:5173"
 echo "  - Backend API:  http://127.0.0.1:8000/docs"
 echo "  Press CTRL+C to terminate both services."

@@ -41,7 +41,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     if (path === '/model') return 'AI World Model Insights & Explainability';
     if (path === '/status') return 'System Infrastructure Status';
     if (path === '/settings') return 'Platform & Engine Configuration';
-    return 'NETSCOPE AI';
+    return 'THREATORA AI';
   };
 
   return (
@@ -53,7 +53,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             {getPageTitle(location.pathname)}
           </h1>
           <p className="text-[11px] text-slate-400 font-mono">
-            NETSCOPE // Autonomous Threat Forecasting System
+            THREATORA // &ldquo;Predict Tomorrow&rsquo;s Threats, Today.&rdquo;
           </p>
         </div>
       </div>

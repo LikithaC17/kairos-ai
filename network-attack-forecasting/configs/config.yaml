@@ -1,6 +1,7 @@
-# NetForecast AI — Central Configuration File
+# Threatora AI — Central Configuration File
 project:
-  name: "NetForecast AI"
+  name: "Threatora AI"
+  tagline: "Predict Tomorrow’s Threats, Today."
   version: "1.0.0"
   random_seed: 42
 

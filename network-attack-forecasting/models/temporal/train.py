@@ -1,98 +1,88 @@
-"""NetForecast AI — Temporal World Model training script.
+"""Threatora AI / Threatora AI — Multi-Model Temporal Training Pipeline.
+
+Supports training the baseline GRU, LSTM, and Transformer sequence forecasting models
+under identical data splits, identical feature preprocessing, and identical evaluation criteria.
 
 Usage
 -----
-    python models/temporal/train.py [--epochs N] [--seed S] [--no-cuda]
+    python models/temporal/train.py --model all [--epochs N] [--seed S] [--no-cuda]
+    python models/temporal/train.py --model gru
+    python models/temporal/train.py --model lstm
+    python models/temporal/train.py --model transformer
 
-What this script does
----------------------
-1. Generates synthetic network-flow sequences via the simulation package.
-2. Applies a strict *chronological* 70 / 15 / 15 train/val/test split.
-   NO random shuffling of sequences — this prevents temporal data leakage.
-3. Fits a Log1p + StandardScaler on the training partition only.
-4. Trains a NetworkStateGRU with:
-      - CrossEntropyLoss with inverse-frequency class weights (handles imbalance)
-      - AdamW optimiser
-      - Early-stopping on validation loss (patience = 5)
-5. Saves:
-      checkpoints/world_model_gru.pt       (model state dict + architecture config)
-      checkpoints/world_model_scaler.pkl   (fitted scaler)
-6. Prints and saves actual train / val / test metrics (no fabricated numbers).
-
-Temporal leakage prevention
-----------------------------
-* Sequences are generated in chronological order (NORMAL -> escalating) and
-  the 70/15/15 boundary is applied at the *sequence* level by index, not by
-  random sampling.
-* Scaler statistics (mean, std) are computed exclusively on the training
-  sequences and then *applied* (not re-fit) to validation and test sets.
+Leakage Prevention & Fair Evaluation Protocol
+----------------------------------------------
+1. Multi-stage timeline sessions (benign -> reconnaissance -> attack -> recovery)
+   are partitioned strictly chronologically across session boundaries:
+     - 70% past sessions -> Training
+     - 15% intermediate sessions -> Validation
+     - 15% future sessions -> Frozen Test Holdout
+   Zero sequence overlap across splits prevents temporal window leakage.
+2. Every partition contains all four security ladder states:
+   NORMAL, ELEVATED, SUSPICIOUS, ATTACK.
+3. Preprocessing transformation (Log1p + StandardScaler) is fitted STRICTLY on
+   training sequences and applied (without refitting) to validation and test sets.
+4. Inverse-frequency class weighting is computed exclusively on training labels.
+5. All models are trained with identical random seeds and evaluated on the identical
+   held-out test set.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pickle
 import sys
 import time
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-# ── make sure the project root is importable regardless of CWD ──────────────
+# ── Ensure project root is importable ─────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from simulation.normal import generate_normal
 from simulation.mixed_escalation import generate_mixed
 from simulation.beaconing import generate_beaconing
 from simulation.ddos import generate_ddos
+from simulation.scanning import generate_scanning
 from simulation.common import LADDER_STATES, FEATURE_COLUMNS
 
-from models.temporal.lstm import NetworkStateGRU, STATE_LABELS, NUM_FEATURES, Log1pStandardScaler
+from models.temporal.gru import NetworkStateGRU, STATE_LABELS, NUM_FEATURES, NUM_STATES, Log1pStandardScaler
+from models.temporal.lstm import NetworkStateLSTM
+from models.temporal.transformer import NetworkStateTransformer
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Constants
+# Constants & Defaults
 # ─────────────────────────────────────────────────────────────────────────────
-SEQUENCE_LENGTH = 20          # T — history look-back window
+SEQUENCE_LENGTH = 20          # T: look-back window steps
 CHECKPOINT_DIR  = PROJECT_ROOT / "checkpoints"
 MODEL_PATH      = CHECKPOINT_DIR / "world_model_gru.pt"
+MODEL_PATH_GRU  = CHECKPOINT_DIR / "world_model_gru.pt"
+MODEL_PATH_LSTM = CHECKPOINT_DIR / "world_model_lstm.pt"
+MODEL_PATH_TF   = CHECKPOINT_DIR / "world_model_transformer.pt"
+MODEL_PATH_BASE = CHECKPOINT_DIR / "world_model.pt"
 SCALER_PATH     = CHECKPOINT_DIR / "world_model_scaler.pkl"
 
 STATE_TO_IDX = {s: i for i, s in enumerate(LADDER_STATES)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Data generation helpers
+# Sequence & Window Generation
 # ─────────────────────────────────────────────────────────────────────────────
-
-def generate_all_sequences(rng: np.random.Generator, total_per_scenario: int = 3000
-                           ) -> list[list[dict]]:
-    """Combine all simulation scenarios into one ordered sequence list."""
-    sequences: list[list[dict]] = []
-    # Normal traffic first (temporal ordering: calm before storm)
-    sequences += generate_normal(rng,    total_per_scenario, min_len=15, max_len=25)
-    sequences += generate_beaconing(rng, total_per_scenario, min_len=15, max_len=25)
-    sequences += generate_mixed(rng,     total_per_scenario, min_len=15, max_len=25)
-    sequences += generate_ddos(rng,      total_per_scenario, min_len=15, max_len=25)
-    return sequences
-
 
 def sequence_to_windows(
     sequence: list[dict],
     window_size: int = SEQUENCE_LENGTH,
 ) -> tuple[list[np.ndarray], list[int], list[int]]:
-    """Slide a fixed window over a single sequence to produce (X, y_curr, y_next) tuples.
-
-    Returns
-    -------
-    windows    : list of float32 arrays, each shape (window_size, F)
-    y_current  : label for the *last* step in the window (current state)
-    y_next     : label for the step *following* the window (next state)
-    """
+    """Slide a fixed window over a single sequence to produce (X, y_curr, y_next) tuples."""
     windows, y_curr, y_next = [], [], []
     n = len(sequence)
     for start in range(n - window_size):
@@ -120,65 +110,71 @@ def build_dataset(
         all_X.extend(ws)
         all_yc.extend(yc)
         all_yn.extend(yn)
-    X  = np.stack(all_X,  axis=0).astype(np.float32)   # (N, T, F)
+    if not all_X:
+        return (
+            np.zeros((0, window_size, NUM_FEATURES), dtype=np.float32),
+            np.zeros((0,), dtype=np.int64),
+            np.zeros((0,), dtype=np.int64),
+        )
+    X  = np.stack(all_X, axis=0).astype(np.float32)
     yc = np.array(all_yc, dtype=np.int64)
     yn = np.array(all_yn, dtype=np.int64)
     return X, yc, yn
 
 
-def load_dataset_from_csv(
-    csv_path: str | Path,
-    window_size: int = SEQUENCE_LENGTH,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load continuous temporal sequence windows from a CSV dataset file.
+def generate_balanced_session_sequences(
+    rng: np.random.Generator,
+    num_sessions: int = 25,
+    rows_per_session_scenario: int = 300,
+) -> tuple[list[list[dict]], list[list[dict]], list[list[dict]]]:
+    """Generate multi-stage chronological monitoring sessions partitioned without temporal leakage.
 
-    Preserves original continuous timestamp flow order across all records.
-    Returns (X, y_current, y_next) numpy arrays.
+    Each session simulates an operational cycle containing:
+    1. Normal benign baseline traffic
+    2. Subtle beaconing / C2 heartbeats
+    3. Lateral movement & mixed attack escalation
+    4. Volumetric DDoS assault
+
+    Partitions:
+    - First 70% of chronological sessions -> Train
+    - Next 15% of chronological sessions -> Validation
+    - Final 15% of chronological sessions -> Test Holdout
     """
-    import pandas as pd
+    sessions: list[list[list[dict]]] = []
+    for _ in range(num_sessions):
+        session_seqs = []
+        session_seqs += generate_normal(rng,    rows_per_session_scenario, min_len=15, max_len=25)
+        session_seqs += generate_scanning(rng,  rows_per_session_scenario, min_len=15, max_len=25)
+        session_seqs += generate_beaconing(rng, rows_per_session_scenario, min_len=15, max_len=25)
+        session_seqs += generate_mixed(rng,     rows_per_session_scenario, min_len=15, max_len=25)
+        session_seqs += generate_ddos(rng,      rows_per_session_scenario, min_len=15, max_len=25)
+        sessions.append(session_seqs)
 
-    p = Path(csv_path)
-    if not p.exists():
-        candidates = [
-            PROJECT_ROOT.parent / p.name,
-            PROJECT_ROOT / p.name,
-            PROJECT_ROOT.parent / csv_path,
-        ]
-        for c in candidates:
-            if c.exists():
-                p = c
-                break
+    train_cutoff = int(num_sessions * 0.70)
+    val_cutoff   = int(num_sessions * 0.85)
 
-    if not p.exists():
-        raise FileNotFoundError(f"Dataset CSV file not found: {csv_path}")
+    seq_train = [seq for s in sessions[:train_cutoff] for seq in s]
+    seq_val   = [seq for s in sessions[train_cutoff:val_cutoff] for seq in s]
+    seq_test  = [seq for s in sessions[val_cutoff:] for seq in s]
 
-    df = pd.read_csv(p)
-    missing = [c for c in FEATURE_COLUMNS + ["state"] if c not in df.columns]
-    if missing:
-        raise ValueError(f"CSV missing required columns: {missing}")
+    return seq_train, seq_val, seq_test
 
-    rows = df.to_dict("records")
-    n = len(rows)
-    all_X, all_yc, all_yn = [], [], []
 
-    for start in range(n - window_size):
-        end = start + window_size
-        window = [
-            [r[col] for col in FEATURE_COLUMNS]
-            for r in rows[start:end]
-        ]
-        all_X.append(window)
-        all_yc.append(STATE_TO_IDX[rows[end - 1]["state"]])
-        all_yn.append(STATE_TO_IDX[rows[end]["state"]])
-
-    X  = np.array(all_X,  dtype=np.float32)
-    yc = np.array(all_yc, dtype=np.int64)
-    yn = np.array(all_yn, dtype=np.int64)
-    return X, yc, yn
+def generate_all_sequences(
+    rng: np.random.Generator,
+    total_per_scenario: int = 3000,
+) -> list[list[dict]]:
+    """Backward-compatible sequence generator returning interleaved multi-scenario sessions."""
+    num_sessions = 25
+    rows_per_scenario = max(40, total_per_scenario // num_sessions)
+    train_seqs, val_seqs, test_seqs = generate_balanced_session_sequences(
+        rng, num_sessions=num_sessions, rows_per_session_scenario=rows_per_scenario
+    )
+    return train_seqs + val_seqs + test_seqs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Training utilities
+# Training Utilities
 # ─────────────────────────────────────────────────────────────────────────────
 
 def class_weights(y: np.ndarray, num_classes: int) -> torch.Tensor:
@@ -195,23 +191,23 @@ def make_loaders(
     X_va: np.ndarray, yc_va: np.ndarray, yn_va: np.ndarray,
     batch_size: int = 64,
 ) -> tuple[DataLoader, DataLoader]:
-    def to_tensors(X, yc, yn):
-        return TensorDataset(
-            torch.tensor(X,  dtype=torch.float32),
-            torch.tensor(yc, dtype=torch.long),
-            torch.tensor(yn, dtype=torch.long),
-        )
-
-    train_ds = to_tensors(X_tr, yc_tr, yn_tr)
-    val_ds   = to_tensors(X_va, yc_va, yn_va)
-
+    train_ds = TensorDataset(
+        torch.tensor(X_tr,  dtype=torch.float32),
+        torch.tensor(yc_tr, dtype=torch.long),
+        torch.tensor(yn_tr, dtype=torch.long),
+    )
+    val_ds = TensorDataset(
+        torch.tensor(X_va,  dtype=torch.float32),
+        torch.tensor(yc_va, dtype=torch.long),
+        torch.tensor(yn_va, dtype=torch.long),
+    )
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  drop_last=False)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, drop_last=False)
     return train_loader, val_loader
 
 
 def evaluate_loader(
-    model: NetworkStateGRU,
+    model: nn.Module,
     loader: DataLoader,
     device: torch.device,
     criterion_curr: nn.NLLLoss,
@@ -235,128 +231,44 @@ def evaluate_loader(
             correct_next += (pred_next == yn_b).sum().item()
             total += X_b.size(0)
 
+    if total == 0:
+        return 0.0, 0.0, 0.0
     return (total_loss / total), (correct_curr / total), (correct_next / total)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main training function
-# ─────────────────────────────────────────────────────────────────────────────
-
-def train(
+def train_single_model(
+    model_name: str,
+    model: nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    test_loader: DataLoader,
+    device: torch.device,
+    criterion_curr: nn.NLLLoss,
+    criterion_next: nn.NLLLoss,
     epochs: int = 30,
-    seed: int = 42,
-    batch_size: int = 64,
     lr: float = 1e-3,
-    hidden_size: int = 128,
-    num_layers: int = 2,
-    dropout: float = 0.3,
     patience: int = 5,
-    use_cuda: bool = True,
-    total_per_scenario: int = 3000,
-    csv_path: str | Path | None = None,
-) -> None:
-    print("=" * 65)
-    print("  NetForecast AI — Temporal World Model Training")
-    print("=" * 65)
-
-    # ── Reproducibility ──────────────────────────────────────────────
-    rng = np.random.default_rng(seed)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-
-    device = torch.device(
-        "cuda" if (use_cuda and torch.cuda.is_available()) else "cpu"
-    )
-    print(f"  Device      : {device}")
-    print(f"  Seed        : {seed}")
-    print(f"  Epochs (max): {epochs}  |  Patience: {patience}")
-
-    # ── Load or Generate data ─────────────────────────────────────────
-    if csv_path is not None:
-        print(f"\n[1/5] Loading sequences from CSV dataset: {csv_path} ...")
-        t0 = time.time()
-        X_all, yc_all, yn_all = load_dataset_from_csv(csv_path, SEQUENCE_LENGTH)
-        print(f"      {len(X_all):,} temporal window samples extracted in {time.time()-t0:.1f}s")
-
-        n = len(X_all)
-        train_end = int(n * 0.70)
-        val_end   = int(n * 0.85)
-
-        X_tr, yc_tr, yn_tr = X_all[:train_end], yc_all[:train_end], yn_all[:train_end]
-        X_va, yc_va, yn_va = X_all[train_end:val_end], yc_all[train_end:val_end], yn_all[train_end:val_end]
-        X_te, yc_te, yn_te = X_all[val_end:], yc_all[val_end:], yn_all[val_end:]
-
-        print(f"\n[2/5] Chronological split (no leakage)")
-        print(f"      Train: {len(X_tr):,} | Val: {len(X_va):,} | Test: {len(X_te):,}")
-    else:
-        print("\n[1/5] Generating synthetic sequences ...")
-        t0 = time.time()
-        sequences = generate_all_sequences(rng, total_per_scenario)
-        print(f"      {len(sequences):,} sequences generated in {time.time()-t0:.1f}s")
-
-        n = len(sequences)
-        train_end = int(n * 0.70)
-        val_end   = int(n * 0.85)
-        seq_train = sequences[:train_end]
-        seq_val   = sequences[train_end:val_end]
-        seq_test  = sequences[val_end:]
-        print(f"\n[2/5] Chronological split (no leakage)")
-        print(f"      Train: {len(seq_train):,} seqs | Val: {len(seq_val):,} | Test: {len(seq_test):,}")
-
-        X_tr, yc_tr, yn_tr = build_dataset(seq_train, SEQUENCE_LENGTH)
-        X_va, yc_va, yn_va = build_dataset(seq_val,   SEQUENCE_LENGTH)
-        X_te, yc_te, yn_te = build_dataset(seq_test,  SEQUENCE_LENGTH)
-
-    print(f"      Windows — Train: {len(X_tr):,}  Val: {len(X_va):,}  Test: {len(X_te):,}")
-
-    # ── Fit scaler on training data ONLY ─────────────────────────────
-    print("\n[3/5] Fitting Log1p+StandardScaler on training data only ...")
-    scaler = Log1pStandardScaler()
-    X_tr_s = scaler.fit_transform(X_tr).astype(np.float32)
-    X_va_s = scaler.transform(X_va).astype(np.float32)
-    X_te_s = scaler.transform(X_te).astype(np.float32)
-
-    # ── Class weights (computed on training labels only) ──────────────
-    num_classes = len(STATE_LABELS)
-    w_curr = class_weights(yc_tr, num_classes).to(device)
-    w_next = class_weights(yn_tr, num_classes).to(device)
-
-    # ── DataLoaders ───────────────────────────────────────────────────
-    train_loader, val_loader = make_loaders(
-        X_tr_s, yc_tr, yn_tr,
-        X_va_s, yc_va, yn_va,
-        batch_size=batch_size,
-    )
-
-    # ── Model, loss, optimiser ────────────────────────────────────────
-    print(f"\n[4/5] Building NetworkStateGRU ...")
-    model = NetworkStateGRU(
-        input_size=NUM_FEATURES,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        num_classes=num_classes,
-        dropout=dropout,
-    ).to(device)
-
+    save_path: Optional[Path] = None,
+    config: Optional[dict] = None,
+) -> dict:
+    """Train and evaluate an individual model."""
+    print(f"\n[{model_name.upper()}] Commencing training...")
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"      Parameters: {total_params:,}")
+    print(f"  Architecture: {model.__class__.__name__} | Trainable parameters: {total_params:,}")
 
-    criterion_curr = nn.NLLLoss(weight=w_curr)
-    criterion_next = nn.NLLLoss(weight=w_next)
     optimiser = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimiser, mode="min", factor=0.5, patience=3
+        optimiser, mode="min", factor=0.5, patience=2
     )
 
-    # ── Training loop ─────────────────────────────────────────────────
-    print(f"\n[5/5] Training ...")
+    best_val_loss = float("inf")
+    best_state = None
+    no_improve = 0
+    start_time = time.perf_counter()
+
     print(f"  {'Epoch':>5}  {'TrainLoss':>10}  {'ValLoss':>9}  "
           f"{'Acc(cur)':>9}  {'Acc(nxt)':>9}  {'LR':>8}")
     print(f"  {'-'*5}  {'-'*10}  {'-'*9}  {'-'*9}  {'-'*9}  {'-'*8}")
-
-    best_val_loss = float("inf")
-    best_state    = None
-    no_improve    = 0
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -372,11 +284,9 @@ def train(
             train_loss += loss.item() * X_b.size(0)
 
         train_loss /= len(train_loader.dataset)
-
         val_loss, val_acc_curr, val_acc_next = evaluate_loader(
             model, val_loader, device, criterion_curr, criterion_next
         )
-
         scheduler.step(val_loss)
         cur_lr = optimiser.param_groups[0]["lr"]
 
@@ -385,92 +295,277 @@ def train(
 
         if val_loss < best_val_loss - 1e-5:
             best_val_loss = val_loss
-            best_state    = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            no_improve    = 0
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            no_improve = 0
         else:
             no_improve += 1
             if no_improve >= patience:
-                print(f"\n  Early stopping at epoch {epoch} (patience={patience})")
+                print(f"  Early stopping triggered at epoch {epoch} (patience={patience})")
                 break
 
-    # ── Restore best weights ──────────────────────────────────────────
+    training_duration_s = round(time.perf_counter() - start_time, 2)
+
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    # ── Test-set evaluation ───────────────────────────────────────────
+    # Final holdout test evaluation
+    test_loss, test_acc_curr, test_acc_next = evaluate_loader(
+        model, test_loader, device, criterion_curr, criterion_next
+    )
+
+    print(f"  Final Test Holdout -> Loss: {test_loss:.4f} | "
+          f"CurAcc: {test_acc_curr*100:.2f}% | NxtAcc: {test_acc_next*100:.2f}% | "
+          f"Time: {training_duration_s}s")
+
+    result = {
+        "model_name": model.__class__.__name__,
+        "model_key": model_name,
+        "parameters": total_params,
+        "training_time_seconds": training_duration_s,
+        "test_loss": round(float(test_loss), 4),
+        "test_acc_current": round(float(test_acc_curr), 4),
+        "test_acc_next": round(float(test_acc_next), 4),
+    }
+
+    if save_path:
+        CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        checkpoint = {
+            "model_type": model_name,
+            "architecture": model.__class__.__name__,
+            "model_state_dict": model.state_dict(),
+            "config": config or {},
+            "metrics": {
+                "test_loss": test_loss,
+                "test_acc_current": test_acc_curr,
+                "test_acc_next": test_acc_next,
+                "training_time_seconds": training_duration_s,
+            },
+            "state_labels": STATE_LABELS,
+            "feature_columns": FEATURE_COLUMNS,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        torch.save(checkpoint, save_path)
+        print(f"  Saved checkpoint -> {save_path}")
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Master Multi-Model Training Entry Point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def train(
+    model_choice: str = "all",
+    epochs: int = 25,
+    seed: int = 42,
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    hidden_size: int = 128,
+    num_layers: int = 2,
+    dropout: float = 0.3,
+    patience: int = 4,
+    use_cuda: bool = True,
+    num_sessions: int = 25,
+    rows_per_session_scenario: int = 300,
+) -> dict:
+    print("=" * 70)
+    print("  Threatora AI / Threatora AI — Multi-Model World Training Pipeline")
+    print("=" * 70)
+
+    # ── Reproducibility ──────────────────────────────────────────────
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    device = torch.device("cuda" if (use_cuda and torch.cuda.is_available()) else "cpu")
+    print(f"  Target Device : {device}")
+    print(f"  Random Seed   : {seed}")
+    print(f"  Model Selection: {model_choice.upper()}")
+    print(f"  Epochs / Pat  : {epochs} max / patience={patience}")
+
+    # ── Partitioned Sequence Generation (No Leakage) ─────────────────
+    print(f"\n[1/4] Generating balanced multi-session chronological sequences...")
+    t0 = time.time()
+    seq_train, seq_val, seq_test = generate_balanced_session_sequences(
+        rng, num_sessions=num_sessions, rows_per_session_scenario=rows_per_session_scenario
+    )
+    print(f"      Sessions: {num_sessions} total (70% Train, 15% Val, 15% Test)")
+    print(f"      Sequences: Train={len(seq_train)}, Val={len(seq_val)}, Test={len(seq_test)} in {time.time()-t0:.2f}s")
+
+    X_tr, yc_tr, yn_tr = build_dataset(seq_train, SEQUENCE_LENGTH)
+    X_va, yc_va, yn_va = build_dataset(seq_val,   SEQUENCE_LENGTH)
+    X_te, yc_te, yn_te = build_dataset(seq_test,  SEQUENCE_LENGTH)
+
+    print(f"      Extracted Windows:")
+    print(f"        Train: {len(X_tr):,} samples | class distribution: {np.bincount(yc_tr, minlength=4)}")
+    print(f"        Val  : {len(X_va):,} samples | class distribution: {np.bincount(yc_va, minlength=4)}")
+    print(f"        Test : {len(X_te):,} samples | class distribution: {np.bincount(yc_te, minlength=4)}")
+
+    # ── Fit Scaler on Training Partition Only ────────────────────────
+    print(f"\n[2/4] Fitting Log1p + StandardScaler on training sequences only (Zero Leakage)...")
+    scaler = Log1pStandardScaler()
+    X_tr_s = scaler.fit_transform(X_tr).astype(np.float32)
+    X_va_s = scaler.transform(X_va).astype(np.float32)
+    X_te_s = scaler.transform(X_te).astype(np.float32)
+
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(SCALER_PATH, "wb") as f:
+        pickle.dump(scaler, f)
+    print(f"      Fitted scaler saved -> {SCALER_PATH}")
+
+    # ── Prepare Loaders & Loss ────────────────────────────────────────
+    num_classes = len(STATE_LABELS)
+    w_curr = class_weights(yc_tr, num_classes).to(device)
+    w_next = class_weights(yn_tr, num_classes).to(device)
+    criterion_curr = nn.NLLLoss(weight=w_curr)
+    criterion_next = nn.NLLLoss(weight=w_next)
+
+    train_loader, val_loader = make_loaders(
+        X_tr_s, yc_tr, yn_tr,
+        X_va_s, yc_va, yn_va,
+        batch_size=batch_size,
+    )
     test_ds = TensorDataset(
         torch.tensor(X_te_s, dtype=torch.float32),
         torch.tensor(yc_te,  dtype=torch.long),
         torch.tensor(yn_te,  dtype=torch.long),
     )
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
-    test_loss, test_acc_curr, test_acc_next = evaluate_loader(
-        model, test_loader, device, criterion_curr, criterion_next
-    )
 
-    print("\n" + "-" * 65)
-    print(f"  FINAL TEST RESULTS (frozen hold-out partition)")
-    print(f"  Test Loss          : {test_loss:.4f}")
-    print(f"  Current-State Acc  : {test_acc_curr:.4f}  ({test_acc_curr*100:.2f}%)")
-    print(f"  Next-State Acc     : {test_acc_next:.4f}  ({test_acc_next*100:.2f}%)")
-    print("-" * 65)
+    # ── Model Instantiations ──────────────────────────────────────────
+    models_to_train: list[str]
+    if model_choice == "all":
+        models_to_train = ["gru", "lstm", "transformer"]
+    elif model_choice in ["gru", "lstm", "transformer"]:
+        models_to_train = [model_choice]
+    else:
+        raise ValueError(f"Unknown model choice: {model_choice}. Choose from gru, lstm, transformer, all.")
 
-    # ── Save checkpoint ───────────────────────────────────────────────
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    checkpoint = {
-        "model_state_dict": model.state_dict(),
-        "config": {
-            "input_size":  NUM_FEATURES,
-            "hidden_size": hidden_size,
-            "num_layers":  num_layers,
-            "num_classes": num_classes,
-            "dropout":     dropout,
-        },
-        "metrics": {
-            "test_loss":           test_loss,
-            "test_acc_current":    test_acc_curr,
-            "test_acc_next":       test_acc_next,
-        },
-        "state_labels": STATE_LABELS,
-        "feature_columns": FEATURE_COLUMNS,
-    }
-    torch.save(checkpoint, MODEL_PATH)
-    print(f"\n  Model checkpoint saved -> {MODEL_PATH}")
+    results_summary = {}
 
-    with open(SCALER_PATH, "wb") as f:
-        pickle.dump(scaler, f)
-    print(f"  Scaler saved        -> {SCALER_PATH}")
-    print("\n  Training complete.\n")
+    print(f"\n[3/4] Training selected models on the identical chronological partition...")
+
+    for m_key in models_to_train:
+        if m_key == "gru":
+            model = NetworkStateGRU(
+                input_size=NUM_FEATURES,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                num_classes=num_classes,
+                dropout=dropout,
+            ).to(device)
+            cfg = {
+                "input_size": NUM_FEATURES,
+                "hidden_size": hidden_size,
+                "num_layers": num_layers,
+                "num_classes": num_classes,
+                "dropout": dropout,
+            }
+            save_p = MODEL_PATH_GRU
+        elif m_key == "lstm":
+            model = NetworkStateLSTM(
+                input_size=NUM_FEATURES,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                num_classes=num_classes,
+                dropout=dropout,
+            ).to(device)
+            cfg = {
+                "input_size": NUM_FEATURES,
+                "hidden_size": hidden_size,
+                "num_layers": num_layers,
+                "num_classes": num_classes,
+                "dropout": dropout,
+            }
+            save_p = MODEL_PATH_LSTM
+        elif m_key == "transformer":
+            model = NetworkStateTransformer(
+                input_size=NUM_FEATURES,
+                d_model=64,
+                nhead=4,
+                num_layers=2,
+                dim_feedforward=128,
+                num_classes=num_classes,
+                dropout=0.2,
+            ).to(device)
+            cfg = {
+                "input_size": NUM_FEATURES,
+                "d_model": 64,
+                "nhead": 4,
+                "num_layers": 2,
+                "dim_feedforward": 128,
+                "num_classes": num_classes,
+                "dropout": 0.2,
+            }
+            save_p = MODEL_PATH_TF
+
+        m_res = train_single_model(
+            model_name=m_key,
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            device=device,
+            criterion_curr=criterion_curr,
+            criterion_next=criterion_next,
+            epochs=epochs,
+            lr=lr,
+            patience=patience,
+            save_path=save_p,
+            config=cfg,
+        )
+        results_summary[m_key] = m_res
+
+        # For baseline GRU, also mirror to world_model.pt
+        if m_key == "gru":
+            torch.save(torch.load(save_p, map_location="cpu"), MODEL_PATH_BASE)
+
+    # ── Summary of Training Runs ──────────────────────────────────────
+    print(f"\n[4/4] Multi-Model Training Run Complete")
+    print("-" * 70)
+    print(f"  {'Model':<12} {'Params':>10} {'Cur Acc':>10} {'Next Acc':>10} {'Loss':>8} {'Time (s)':>10}")
+    print(f"  {'-'*12} {'-'*10} {'-'*10} {'-'*10} {'-'*8} {'-'*10}")
+    for m_key, res in results_summary.items():
+        print(f"  {m_key.upper():<12} {res['parameters']:>10,} "
+              f"{res['test_acc_current']*100:>9.2f}% "
+              f"{res['test_acc_next']*100:>9.2f}% "
+              f"{res['test_loss']:>8.4f} "
+              f"{res['training_time_seconds']:>9.2f}s")
+    print("-" * 70)
+
+    # Save training metadata
+    meta_path = CHECKPOINT_DIR / "training_metadata.json"
+    with open(meta_path, "w") as f:
+        json.dump({
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "seed": seed,
+            "train_samples": len(X_tr),
+            "val_samples": len(X_va),
+            "test_samples": len(X_te),
+            "models_trained": results_summary,
+        }, f, indent=2)
+    print(f"  Metadata saved -> {meta_path}\n")
+
+    return results_summary
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train the NetForecast temporal world model")
-    parser.add_argument("--epochs",   type=int,   default=30,    help="Maximum training epochs")
+    parser = argparse.ArgumentParser(description="Train the Threatora AI temporal world models")
+    parser.add_argument("--model",    type=str,   default="all", choices=["gru", "lstm", "transformer", "all"], help="Architecture to train")
+    parser.add_argument("--epochs",   type=int,   default=25,    help="Maximum training epochs")
     parser.add_argument("--seed",     type=int,   default=42,    help="Random seed")
     parser.add_argument("--no-cuda",  action="store_true",       help="Disable GPU even if available")
-    parser.add_argument("--rows",     type=int,   default=3000,  help="Rows per scenario for synthetic mode")
-    parser.add_argument("--csv",      type=str,   default=None,  help="Path to CSV dataset file (e.g. network_traffic_10000.csv)")
+    parser.add_argument("--sessions", type=int,   default=25,    help="Number of chronological simulation sessions")
+    parser.add_argument("--rows-per-scenario", type=int, default=300, help="Rows per scenario per session")
     args = parser.parse_args()
 
-    csv_target = args.csv
-    if csv_target is None:
-        # Check standard locations for network_traffic_10000.csv
-        candidates = [
-            PROJECT_ROOT.parent / "network_traffic_10000.csv",
-            PROJECT_ROOT / "network_traffic_10000.csv",
-            Path("network_traffic_10000.csv"),
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                csv_target = candidate
-                break
-
     train(
+        model_choice=args.model,
         epochs=args.epochs,
         seed=args.seed,
         use_cuda=not args.no_cuda,
-        total_per_scenario=args.rows,
-        csv_path=csv_target,
+        num_sessions=args.sessions,
+        rows_per_session_scenario=args.rows_per_scenario,
     )

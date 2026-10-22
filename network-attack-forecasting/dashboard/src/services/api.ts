@@ -13,7 +13,7 @@ import axios from 'axios';
 function resolveApiBaseUrl(): string {
   // 1. Operator override from SOC Settings page
   if (typeof window !== 'undefined' && window.localStorage) {
-    const custom = window.localStorage.getItem('NETSCOPE_API_URL');
+    const custom = window.localStorage.getItem('THREATORA_API_URL') || window.localStorage.getItem('NETSCOPE_API_URL');
     if (custom && custom.trim()) {
       return sanitizeUrl(custom.trim());
     }

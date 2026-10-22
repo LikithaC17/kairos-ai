@@ -91,7 +91,7 @@ export const Simulation: React.FC = () => {
               </h2>
             </div>
             <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
-              Step-by-step sequential verification of how the NetForecast AI world model anticipates multi-stage intrusion campaigns. Select an adversary scenario and observe how model probabilities react to incoming telemetry.
+              Step-by-step sequential verification of how the Threatora AI world model anticipates multi-stage intrusion campaigns. Select an adversary scenario and observe how model probabilities react to incoming telemetry.
             </p>
           </div>
 

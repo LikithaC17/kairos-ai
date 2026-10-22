@@ -1,4 +1,4 @@
-// TypeScript Interfaces for NetForecast AI Security World Model
+// TypeScript Interfaces for Threatora AI Security World Model
 
 export type SecurityState = 'NORMAL' | 'ELEVATED' | 'SUSPICIOUS' | 'ATTACK';
 export type SeverityLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
@@ -235,12 +235,14 @@ export interface Alert {
 export interface ModelInfo {
   model_name: string;
   model_type: string;
+  model_key?: string;
   version: string;
   parameters: number;
   input_features: number;
   sequence_length: number;
   hidden_dimension: number;
   dropout: number;
+  single_sample_latency_ms?: number;
   heads: {
     head_a: string;
     head_b: string;
@@ -258,6 +260,40 @@ export interface ModelInfo {
   };
   feature_list: string[];
   state_ladder: string[];
+}
+
+export interface HeadMetrics {
+  accuracy: number;
+  f1_macro: number;
+  f1_weighted: number;
+  precision_macro?: number;
+  recall_macro?: number;
+  auroc_macro: number | null;
+  per_class?: Record<string, { precision: number; recall: number; f1: number; support: number }>;
+}
+
+export interface ModelBenchmarkEntry {
+  model_name: string;
+  model_type: string;
+  architecture_key: string;
+  parameters: number;
+  checkpoint_size_kb: number;
+  single_sample_latency_ms: number;
+  batch_32_latency_ms: number;
+  current_state: HeadMetrics;
+  next_state: HeadMetrics;
+}
+
+export interface ModelBenchmarkComparison {
+  timestamp: string;
+  test_samples: number;
+  state_labels: string[];
+  models: Record<string, ModelBenchmarkEntry>;
+}
+
+export interface ActiveModelResponse {
+  active_model: string;
+  available_models: string[];
 }
 
 export interface ExplainabilityFeature {

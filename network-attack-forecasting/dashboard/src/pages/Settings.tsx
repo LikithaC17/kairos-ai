@@ -11,9 +11,9 @@ export const Settings: React.FC = () => {
     e.preventDefault();
     if (typeof window !== 'undefined' && window.localStorage) {
       if (apiUrl.trim()) {
-        window.localStorage.setItem('NETSCOPE_API_URL', apiUrl.trim());
+        window.localStorage.setItem('THREATORA_API_URL', apiUrl.trim());
       } else {
-        window.localStorage.removeItem('NETSCOPE_API_URL');
+        window.localStorage.removeItem('THREATORA_API_URL');
       }
     }
     setSaved(true);

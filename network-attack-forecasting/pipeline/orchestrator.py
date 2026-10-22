@@ -1,12 +1,11 @@
-"""
-Master End-to-End Pipeline Orchestrator for NetForecast AI.
+"""Master End-to-End Pipeline Orchestrator for Threatora AI / Threatora AI.
 
 Connects every module from Traffic Input to Security Dashboard:
 1. TRAFFIC INGESTION (CSV, NetFlow, or Simulation)
 2. PREPROCESSING & CLEANING (Vikas)
 3. TEMPORAL WINDOWING (Vikas)
 4. FEATURE STATE & NETWORK GRAPH (Nagarjuna)
-5. AI WORLD MODEL INFERENCE (Likitha)
+5. AI WORLD MODEL INFERENCE (Likitha — supports GRU, LSTM, and Transformer)
 6. K-STEP LOOKAHEAD FORECASTING (Likitha / Prediction Engine)
 7. RISK & ATTACK STAGE PREDICTION (Prediction Engine)
 8. MITRE ATT&CK MAPPING (Nagarjuna)
@@ -21,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import sys
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -75,19 +74,19 @@ class PipelineRunResult:
 
 
 class EndToEndPipeline:
-    """
-    Unified end-to-end execution pipeline connecting all system modules.
-    """
+    """Unified end-to-end execution pipeline connecting all system modules with multi-model support."""
 
     def __init__(
         self,
         checkpoint_dir: Optional[Union[str, Path]] = None,
         sequence_length: int = 20,
         forecast_horizon: int = 3,
+        default_model_type: str = "gru",
     ):
         self.sequence_length = sequence_length
         self.forecast_horizon = forecast_horizon
         self.checkpoint_dir = Path(checkpoint_dir or (PROJECT_ROOT / "checkpoints"))
+        self.default_model_type = default_model_type.lower()
 
         # Initialize engines
         self.prediction_engine = PredictionEngine()
@@ -95,26 +94,53 @@ class EndToEndPipeline:
         self.xai_engine = ExplainabilityEngine()
         self.alert_engine = AlertEngine(alert_threshold=35)
 
-        # Load trained world model and scaler
+        # Model cache: model_type -> (model, scaler)
+        self._loaded_models: Dict[str, Tuple[Any, Any]] = {}
         self.world_model = None
         self.scaler = None
-        self._load_model()
+        self._load_model(self.default_model_type)
 
-    def _load_model(self):
+    def _load_model(self, model_type: str = "gru") -> Tuple[Optional[Any], Optional[Any]]:
+        norm = model_type.lower()
         try:
-            self.world_model, self.scaler = load_world_model(self.checkpoint_dir)
-        except Exception as e:
-            # Model will be loaded when available
-            self.world_model, self.scaler = None, None
+            m, s = load_world_model(self.checkpoint_dir, model_type=norm)
+            self._loaded_models[norm] = (m, s)
+            if norm == self.default_model_type or self.world_model is None:
+                self.world_model = m
+                self.scaler = s
+            return m, s
+        except Exception:
+            return None, None
+
+    def get_model(self, model_type: str = "gru") -> Tuple[Optional[Any], Optional[Any]]:
+        norm = model_type.lower()
+        if norm in self._loaded_models:
+            return self._loaded_models[norm]
+        m, s = self._load_model(norm)
+        if m is not None:
+            return m, s
+        # Fallback to default
+        if self.world_model is not None and self.scaler is not None:
+            return self.world_model, self.scaler
+        return None, None
+
+    def set_default_model(self, model_type: str) -> bool:
+        norm = model_type.lower()
+        m, s = self.get_model(norm)
+        if m is not None and s is not None:
+            self.default_model_type = norm
+            self.world_model = m
+            self.scaler = s
+            return True
+        return False
 
     def run(
         self,
         traffic_data: Union[pd.DataFrame, str, Path],
         scenario_name: str = "live",
+        model_type: Optional[str] = None,
     ) -> PipelineRunResult:
-        """
-        Executes the complete pipeline on raw or simulated network traffic flows.
-        """
+        """Executes the complete pipeline on raw or simulated network traffic flows."""
         status: Dict[str, str] = {}
         t_pipeline_start = time.perf_counter()
         iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -158,10 +184,9 @@ class EndToEndPipeline:
 
         # Step 5: Temporal Windowing
         try:
-            # Extract core 7 features for the GRU model
+            # Extract core 7 features for the world model
             core_cols = [c for c in CORE_WORLD_MODEL_FEATURES if c in featured_df.columns]
             if len(core_cols) < 7:
-                # If some columns missing, fill with defaults
                 for col in CORE_WORLD_MODEL_FEATURES:
                     if col not in featured_df.columns:
                         featured_df[col] = 0.0
@@ -170,7 +195,6 @@ class EndToEndPipeline:
 
             # Ensure we have at least sequence_length rows
             if len(raw_core_matrix) < self.sequence_length:
-                # Pad earlier timesteps with first row
                 padding = np.repeat(raw_core_matrix[:1], self.sequence_length - len(raw_core_matrix), axis=0)
                 seq_matrix = np.vstack([padding, raw_core_matrix])
             else:
@@ -184,25 +208,25 @@ class EndToEndPipeline:
         # Step 6: World Model Inference (Real AI Pipeline)
         t_infer_start = time.perf_counter()
         infer_latency_ms = 0.0
-        try:
-            if self.world_model is None or self.scaler is None:
-                self._load_model()
+        active_model_type = (model_type or self.default_model_type).lower()
+        active_model, active_scaler = self.get_model(active_model_type)
 
-            if self.world_model is not None and self.scaler is not None:
-                inf_result = run_world_model_inference(self.world_model, self.scaler, seq_matrix)
+        try:
+            if active_model is not None and active_scaler is not None:
+                inf_result = run_world_model_inference(active_model, active_scaler, seq_matrix)
                 infer_latency_ms = round((time.perf_counter() - t_infer_start) * 1000, 2)
                 current_state = inf_result["current_state"]
                 current_probs = inf_result["current_probabilities"]
                 pred_next_state = inf_result["predicted_next_state"]
                 pred_conf = inf_result["prediction_confidence"]
-                status["AI World Model"] = "PASS"
+                status["AI World Model"] = f"PASS ({active_model_type.upper()})"
             else:
                 infer_latency_ms = 0.0
                 current_state = "MODEL_UNAVAILABLE"
                 current_probs = {"NORMAL": 0.0, "ELEVATED": 0.0, "SUSPICIOUS": 0.0, "ATTACK": 0.0}
                 pred_next_state = "MODEL_UNAVAILABLE"
                 pred_conf = 0.0
-                status["AI World Model"] = "FAIL (Model checkpoint unavailable)"
+                status["AI World Model"] = f"FAIL (Model '{active_model_type}' unavailable)"
         except Exception as e:
             infer_latency_ms = round((time.perf_counter() - t_infer_start) * 1000, 2)
             status["AI World Model"] = f"FAIL ({e})"
@@ -341,7 +365,8 @@ class EndToEndPipeline:
         decision_dict["forecast"] = forecast_steps
         decision_dict["inference_latency_ms"] = infer_latency_ms
         decision_dict["pipeline_latency_ms"] = pipeline_latency_ms
-        decision_dict["forecast_method"] = "Controlled Horizon Projection (GRU Dual-Head + State Dynamics)"
+        decision_dict["active_model"] = active_model_type.upper()
+        decision_dict["forecast_method"] = f"Controlled Horizon Projection ({active_model_type.upper()} Dual-Head + State Dynamics)"
 
         return PipelineRunResult(
             timestamp=iso_now,
